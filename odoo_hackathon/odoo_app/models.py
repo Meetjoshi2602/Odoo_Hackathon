@@ -1,83 +1,144 @@
 from django.db import models
-from django.contrib.auth.models import BaseUserManager, AbstractBaseUser
-from .logs import log_info, log_error, log_warning
+from django.contrib.auth.models import (
+    AbstractBaseUser,
+    BaseUserManager,
+    PermissionsMixin,
+)
+from django.utils import timezone
 
 
 class UserManager(BaseUserManager):
-    def create_user(
-        self, email, name, terms_and_condition, password=None, password2=None
-    ):
+    def create_user(self, email, name, password=None, **extra_fields):
         if not email:
-            log_error("Attempted to create a user without an email address.")
-            raise ValueError("User must have an email address")
-
-        user = self.model(
-            email=self.normalize_email(email),
-            name=name,
-            terms_and_condition=terms_and_condition,
-        )
-
-        if password:
-            user.set_password(password)
-            log_info(f"Password set for user {email}")
-        else:
-            log_warning(f"User {email} was created without a password")
-
+            raise ValueError("The Email field must be set")
+        email = self.normalize_email(email)
+        user = self.model(email=email, name=name, **extra_fields)
+        user.set_password(password)
         user.save(using=self._db)
-        log_info(f"User {email} created successfully.")
         return user
 
-    def create_superuser(self, email, name, terms_and_condition, password=None):
-        user = self.create_user(
-            email,
-            password=password,
-            name=name,
-            terms_and_condition=terms_and_condition,
-        )
-        user.is_admin = True
-        user.save(using=self._db)
-        log_info(f"Superuser {email} created successfully.")
-        return user
+    def create_superuser(self, email, name, password=None, **extra_fields):
+        extra_fields.setdefault("is_admin", True)
+        extra_fields.setdefault("is_active", True)
+        extra_fields.setdefault("is_superuser", True)
+        extra_fields.setdefault("is_staff", True)  # Add this
+        return self.create_user(email, name, password, **extra_fields)
 
 
-# Custom User Model
-class User(AbstractBaseUser):
-    email = models.EmailField(
-        verbose_name="Email",
-        max_length=255,
-        unique=True,
-    )
-    name = models.CharField(max_length=200)
-    terms_and_condition = models.BooleanField()
+class User(AbstractBaseUser, PermissionsMixin):
+    email = models.EmailField(unique=True)
+    name = models.CharField(max_length=255)
     is_active = models.BooleanField(default=True)
     is_admin = models.BooleanField(default=False)
-    subscription_plan = models.CharField(
-        max_length=10, verbose_name="subscription_plan", default="FREE"
-    )
+    is_staff = models.BooleanField(default=False)
+    points_balance = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    terms_and_condition = models.BooleanField(default=False)  # Add this field
 
     objects = UserManager()
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ["name", "terms_and_condition"]
+    REQUIRED_FIELDS = ["name"]
 
     def __str__(self):
         return self.email
 
-    def has_perm(self, perm, obj=None):
-        "Does the user have a specific permission?"
-        if self.is_admin:
-            log_info(f"User {self.email} has permission: {perm}")
-        return self.is_admin
 
-    def has_module_perms(self, app_label):
-        "Does the user have permissions to view the app `app_label`?"
-        log_info(f"User {self.email} has access to module {app_label}")
-        return True
+# Item Model for Swapping
+# models.py
+class Item(models.Model):
+    STATUS_CHOICES = (
+        ("available", "Available"),
+        ("pending", "Pending"),
+        ("swapped", "Swapped"),
+    )
+    CONDITION_CHOICES = (
+        ("new", "New"),
+        ("like_new", "Like New"),
+        ("good", "Good"),
+        ("fair", "Fair"),
+        ("poor", "Poor"),
+    )
+    CATEGORY_CHOICES = (
+        ("clothing", "Clothing"),
+        ("electronics", "Electronics"),
+        ("furniture", "Furniture"),
+        ("books", "Books"),
+        ("other", "Other"),
+    )
+    TYPE_CHOICES = (
+        ("men", "Men"),
+        ("women", "Women"),
+        ("unisex", "Unisex"),
+        ("other", "Other"),
+    )
+    SIZE_CHOICES = (
+        ("xs", "XS"),
+        ("s", "S"),
+        ("m", "M"),
+        ("l", "L"),
+        ("xl", "XL"),
+        ("other", "Other"),
+    )
 
-    @property
-    def is_staff(self):
-        "Is the user a member of staff?"
-        log_info(f"User {self.email} is {'staff' if self.is_admin else 'not staff'}")
-        return self.is_admin
+    title = models.CharField(max_length=255)
+    description = models.TextField()
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="items")
+    status = models.CharField(
+        max_length=20, choices=STATUS_CHOICES, default="available"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    image = models.URLField(blank=True, null=True)
+    points_value = models.IntegerField(default=0)
+    category = models.CharField(
+        max_length=50, choices=CATEGORY_CHOICES, default="other"
+    )
+    type = models.CharField(max_length=50, choices=TYPE_CHOICES, default="other")
+    size = models.CharField(max_length=50, choices=SIZE_CHOICES, default="other")
+    condition = models.CharField(
+        max_length=50, choices=CONDITION_CHOICES, default="good"
+    )
+    tags = models.CharField(
+        max_length=255, blank=True, null=True
+    )  # Comma-separated tags
+
+    def __str__(self):
+        return self.title
+
+
+# models.py
+class ItemImage(models.Model):
+    item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="images")
+    image = models.URLField()
+    uploaded_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"Image for {self.item.title}"
+
+
+# Swap Model for Tracking Swap Transactions
+class Swap(models.Model):
+    STATUS_CHOICES = (
+        ("pending", "Pending"),
+        ("accepted", "Accepted"),
+        ("completed", "Completed"),
+        ("cancelled", "Cancelled"),
+    )
+
+    requester = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="requested_swaps"
+    )
+    item_offered = models.ForeignKey(
+        Item, on_delete=models.CASCADE, related_name="offered_swaps"
+    )
+    item_requested = models.ForeignKey(
+        Item, on_delete=models.CASCADE, related_name="requested_swaps"
+    )
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Swap: {self.item_offered} for {self.item_requested} ({self.status})"
