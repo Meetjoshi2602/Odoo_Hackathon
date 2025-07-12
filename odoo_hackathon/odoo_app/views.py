@@ -171,11 +171,15 @@ class UserDashboardView(generics.GenericAPIView):
             user_items = Item.objects.filter(owner=request.user)
             items_serializer = ItemSerializer(user_items, many=True)
             ongoing_swaps = Swap.objects.filter(
-                Q(requester=request.user) | Q(item_offered__owner=request.user),
+                Q(requester=request.user)
+                | Q(item_offered__owner=request.user)
+                | Q(item_requested__owner=request.user),
                 status__in=["pending", "accepted"],
             )
             completed_swaps = Swap.objects.filter(
-                Q(requester=request.user) | Q(item_offered__owner=request.user),
+                Q(requester=request.user)
+                | Q(item_offered__owner=request.user)
+                | Q(item_requested__owner=request.user),
                 status="completed",
             )
             ongoing_swaps_serializer = SwapSerializer(ongoing_swaps, many=True)
@@ -198,7 +202,25 @@ class UserDashboardView(generics.GenericAPIView):
             return error_response("Failed to fetch dashboard data", str(e))
 
 
-# views.py
+import logging
+
+
+logger = logging.getLogger(__name__)
+
+
+# Utility functions for logging
+def log_info(message):
+    logger.info(message)
+
+
+def log_warning(message):
+    logger.warning(message)
+
+
+def log_error(message, exc_info=False):
+    logger.error(message, exc_info=exc_info)
+
+
 class ItemCreateView(generics.CreateAPIView):
     queryset = Item.objects.all()
     serializer_class = ItemSerializer
@@ -211,7 +233,14 @@ class ItemCreateView(generics.CreateAPIView):
             created_items = []
 
             if isinstance(data, list):
+                # Validate that each item in the list is a dictionary
                 for item_data in data:
+                    if not isinstance(item_data, dict):
+                        log_warning(f"Invalid item data format: {item_data}")
+                        return error_response(
+                            "Each item in the list must be a dictionary",
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                        )
                     serializer = self.get_serializer(
                         data=item_data, context={"request": request}
                     )
@@ -234,6 +263,13 @@ class ItemCreateView(generics.CreateAPIView):
                     status_code=status.HTTP_201_CREATED,
                 )
             else:
+                # Handle single item creation
+                if not isinstance(data, dict):
+                    log_warning(f"Invalid data format: {data}")
+                    return error_response(
+                        "Request data must be a dictionary",
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    )
                 serializer = self.get_serializer(
                     data=data, context={"request": request}
                 )
@@ -253,7 +289,8 @@ class ItemCreateView(generics.CreateAPIView):
 
         except Exception as e:
             log_error(
-                f"Error creating item(s) for user {request.user.id}: {e}", exc_info=True
+                f"Error creating item(s) for user {request.user.id}: {str(e)}",
+                exc_info=True,
             )
             return error_response(
                 "An unexpected error occurred",
@@ -262,11 +299,28 @@ class ItemCreateView(generics.CreateAPIView):
             )
 
 
-# views.py
-class ItemDetailView(generics.RetrieveAPIView):
+# Utility functions for logging
+def log_info(message):
+    logger.info(message)
+
+
+def log_warning(message):
+    logger.warning(message)
+
+
+def log_error(message, exc_info=False):
+    logger.error(message, exc_info=exc_info)
+
+
+class ItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Item.objects.all()
     serializer_class = ItemSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [AllowAny]  # We'll override permissions for PUT and DELETE
+
+    def get_permissions(self):
+        if self.request.method in ["PUT", "DELETE"]:
+            return [IsAuthenticated()]  # Only authenticated users can update or delete
+        return [AllowAny()]  # Allow anyone to retrieve
 
     def get(self, request, *args, **kwargs):
         try:
@@ -282,9 +336,94 @@ class ItemDetailView(generics.RetrieveAPIView):
                 "Item not found", status_code=status.HTTP_404_NOT_FOUND
             )
         except Exception as e:
-            log_error(f"Error fetching item details: {e}", exc_info=True)
+            log_error(f"Error fetching item details: {str(e)}", exc_info=True)
             return error_response(
                 "Failed to fetch item details",
+                str(e),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def put(self, request, *args, **kwargs):
+        try:
+            log_info(
+                f"Item update attempt for item ID {self.kwargs['pk']} by user {request.user.id}"
+            )
+            item = self.get_object()
+            # Check if the user is the owner
+            if item.owner != request.user:
+                log_warning(
+                    f"User {request.user.id} attempted to update item {self.kwargs['pk']} they do not own"
+                )
+                return error_response(
+                    "You can only update your own items",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+            serializer = self.get_serializer(item, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                log_info(
+                    f"Successfully updated item: {item.title} for user {request.user.id}"
+                )
+                return success_response(
+                    data=serializer.data,
+                    msg="Item updated successfully",
+                    status_code=status.HTTP_200_OK,
+                )
+            log_warning(f"Item update failed: {serializer.errors}")
+            return error_response(
+                "Failed to update item",
+                serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        except Item.DoesNotExist:
+            log_warning(f"Item ID {self.kwargs['pk']} not found")
+            return error_response(
+                "Item not found", status_code=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            log_error(
+                f"Error updating item {self.kwargs['pk']}: {str(e)}", exc_info=True
+            )
+            return error_response(
+                "Failed to update item",
+                str(e),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def delete(self, request, *args, **kwargs):
+        try:
+            log_info(
+                f"Item deletion attempt for item ID {self.kwargs['pk']} by user {request.user.id}"
+            )
+            item = self.get_object()
+            # Check if the user is the owner
+            if item.owner != request.user:
+                log_warning(
+                    f"User {request.user.id} attempted to delete item {self.kwargs['pk']} they do not own"
+                )
+                return error_response(
+                    "You can only delete your own items",
+                    status_code=status.HTTP_403_FORBIDDEN,
+                )
+            item_title = item.title
+            item.delete()
+            log_info(
+                f"Successfully deleted item: {item_title} for user {request.user.id}"
+            )
+            return success_response(
+                msg="Item deleted successfully", status_code=status.HTTP_204_NO_CONTENT
+            )
+        except Item.DoesNotExist:
+            log_warning(f"Item ID {self.kwargs['pk']} not found")
+            return error_response(
+                "Item not found", status_code=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            log_error(
+                f"Error deleting item {self.kwargs['pk']}: {str(e)}", exc_info=True
+            )
+            return error_response(
+                "Failed to delete item",
                 str(e),
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
@@ -303,11 +442,14 @@ class ItemListView(generics.ListAPIView):
                 data=serializer.data, msg="Items retrieved successfully"
             )
         except Exception as e:
-            log_error(f"Error fetching items: {e}", exc_info=True)
-            return error_response("Failed to fetch items", str(e))
+            log_error(f"Error fetching items: {str(e)}", exc_info=True)
+            return error_response(
+                "Failed to fetch items",
+                str(e),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
-# views.py
 class RedeemItemView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ItemSerializer
@@ -372,7 +514,8 @@ class RedeemItemView(generics.GenericAPIView):
             )
         except Exception as e:
             log_error(
-                f"Error redeeming item for user {request.user.id}: {e}", exc_info=True
+                f"Error redeeming item for user {request.user.id}: {str(e)}",
+                exc_info=True,
             )
             return error_response(
                 "Failed to redeem item",
@@ -411,6 +554,9 @@ class SwapRequestView(generics.CreateAPIView):
 
 
 # --------- Swap Update View ------------
+from django.db import transaction
+
+
 class SwapUpdateView(generics.UpdateAPIView):
     queryset = Swap.objects.all()
     serializer_class = SwapSerializer
@@ -419,15 +565,40 @@ class SwapUpdateView(generics.UpdateAPIView):
     def patch(self, request, *args, **kwargs):
         try:
             swap = self.get_object()
-            # Only the owner of the offered item can update the swap
-            if swap.item_offered.owner != request.user:
+            # Check if user is requester or owner of requested item
+            is_requester = swap.requester == request.user
+            is_requested_owner = swap.item_requested.owner == request.user
+
+            if not (is_requester or is_requested_owner):
                 log_warning(
-                    f"User {request.user.email} attempted to update swap {swap.id} they don't own"
+                    f"User {request.user.email} attempted to update swap {swap.id} they are not authorized for"
                 )
                 return error_response(
                     "You are not authorized to update this swap",
                     status_code=status.HTTP_403_FORBIDDEN,
                 )
+
+            # Restrict fields based on user role
+            if is_requester:
+                allowed_fields = {"item_offered_id", "item_requested_id"}
+                if any(key not in allowed_fields for key in request.data.keys()):
+                    log_warning(
+                        f"Requester {request.user.email} attempted to update unauthorized fields in swap {swap.id}"
+                    )
+                    return error_response(
+                        "Requesters can only update item_offered_id or item_requested_id",
+                        status_code=status.HTTP_403_FORBIDDEN,
+                    )
+            elif is_requested_owner:
+                allowed_fields = {"status"}
+                if any(key not in allowed_fields for key in request.data.keys()):
+                    log_warning(
+                        f"Requested item owner {request.user.email} attempted to update unauthorized fields in swap {swap.id}"
+                    )
+                    return error_response(
+                        "Requested item owners can only update status",
+                        status_code=status.HTTP_403_FORBIDDEN,
+                    )
 
             serializer = self.get_serializer(
                 swap, data=request.data, partial=True, context={"request": request}
@@ -438,22 +609,64 @@ class SwapUpdateView(generics.UpdateAPIView):
                     f"Swap {swap.id} updated to status {serializer.validated_data.get('status', swap.status)} by user {request.user.email}"
                 )
 
-                # Update item statuses if swap is completed
+                # Update item statuses, ownership, and points if swap is completed
                 if serializer.validated_data.get("status") == "completed":
-                    swap.item_offered.status = "swapped"
-                    swap.item_requested.status = "swapped"
-                    swap.item_offered.save()
-                    swap.item_requested.save()
-                    # Optional: Update points balance
-                    swap.requester.points_balance -= swap.item_requested.points_value
-                    swap.item_offered.owner.points_balance += (
-                        swap.item_requested.points_value
-                    )
-                    swap.requester.save()
-                    swap.item_offered.owner.save()
-                    log_info(
-                        f"Items {swap.item_offered.title} and {swap.item_requested.title} marked as swapped; points updated"
-                    )
+                    if not is_requested_owner:
+                        log_warning(
+                            f"User {request.user.email} attempted to complete swap {swap.id} without being the requested item owner"
+                        )
+                        return error_response(
+                            "Only the requested item owner can complete the swap",
+                            status_code=status.HTTP_403_FORBIDDEN,
+                        )
+                    # Validate points_value
+                    if (
+                        swap.item_requested.points_value is None
+                        or swap.item_requested.points_value <= 0
+                    ):
+                        log_error(
+                            f"Invalid points_value for item {swap.item_requested.id}: {swap.item_requested.points_value}"
+                        )
+                        return error_response(
+                            "Requested item has invalid points value",
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                        )
+
+                    # Use transaction to ensure atomicity
+                    with transaction.atomic():
+                        # Store original owners for logging
+                        original_offered_owner = swap.item_offered.owner
+                        original_requested_owner = swap.item_requested.owner
+
+                        # Swap item ownership
+                        swap.item_offered.owner = (
+                            swap.item_requested.owner
+                        )  # Requested item's owner gets offered item
+                        swap.item_requested.owner = (
+                            swap.requester
+                        )  # Requester gets requested item
+
+                        # Update item statuses
+                        swap.item_offered.status = "swapped"
+                        swap.item_requested.status = "swapped"
+
+                        # Save item changes
+                        swap.item_offered.save()
+                        swap.item_requested.save()
+
+                        # Award points to the requested item owner
+                        swap.item_requested.owner.points_balance += (
+                            swap.item_requested.points_value
+                        )
+                        swap.item_requested.owner.save()
+
+                        # Log the ownership change and points update
+                        log_info(
+                            f"Swap {swap.id} completed: "
+                            f"Item {swap.item_offered.title} ownership transferred from {original_offered_owner.email} to {swap.item_offered.owner.email}; "
+                            f"Item {swap.item_requested.title} ownership transferred from {original_requested_owner.email} to {swap.item_requested.owner.email}; "
+                            f"{swap.item_requested.points_value} points awarded to user {original_requested_owner.email}"
+                        )
 
                 return success_response(
                     data=serializer.data, msg="Swap updated successfully"

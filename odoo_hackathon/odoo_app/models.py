@@ -31,10 +31,11 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_admin = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
+    is_superuser = models.BooleanField(default=False)  # Add this field
     points_balance = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    terms_and_condition = models.BooleanField(default=False)  # Add this field
+    terms_and_condition = models.BooleanField(default=False)
 
     objects = UserManager()
 

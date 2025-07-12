@@ -5,36 +5,15 @@ from .models import User, Item, ItemImage, Swap
 
 # Custom UserAdmin for User model
 class UserAdmin(BaseUserAdmin):
-    list_display = (
-        "email",
-        "name",
-        "points_balance",
-        "is_active",
-        "is_admin",
-        "is_staff",
-        "terms_and_condition",
-        "created_at",
-    )
-    list_filter = ("is_active", "is_admin", "is_staff", "terms_and_condition")
+    list_display = ("email", "name", "is_active", "is_staff", "is_superuser")
+    list_filter = ("is_active", "is_staff", "is_superuser")
     fieldsets = (
         (None, {"fields": ("email", "password")}),
-        (
-            "Personal Info",
-            {"fields": ("name", "points_balance", "terms_and_condition")},
-        ),
+        ("Personal Info", {"fields": ("name", "points_balance")}),
         (
             "Permissions",
-            {
-                "fields": (
-                    "is_active",
-                    "is_admin",
-                    "is_staff",
-                    "groups",
-                    "user_permissions",
-                )
-            },
+            {"fields": ("is_active", "is_staff", "is_superuser", "is_admin")},
         ),
-        ("Important dates", {"fields": ("created_at", "updated_at")}),
     )
     add_fieldsets = (
         (
@@ -44,20 +23,19 @@ class UserAdmin(BaseUserAdmin):
                 "fields": (
                     "email",
                     "name",
-                    "points_balance",
                     "password1",
                     "password2",
                     "is_active",
-                    "is_admin",
                     "is_staff",
-                    "terms_and_condition",
+                    "is_superuser",
+                    "is_admin",
                 ),
             },
         ),
     )
     search_fields = ("email", "name")
     ordering = ("email",)
-    filter_horizontal = ("groups", "user_permissions")
+    filter_horizontal = ()
 
     def get_fieldsets(self, request, obj=None):
         # Dynamic fieldsets for adding vs. editing
