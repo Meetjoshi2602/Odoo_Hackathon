@@ -4,7 +4,6 @@ from django.contrib.auth.models import (
     BaseUserManager,
     PermissionsMixin,
 )
-from django.utils import timezone
 
 
 class UserManager(BaseUserManager):
@@ -21,7 +20,7 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("is_admin", True)
         extra_fields.setdefault("is_active", True)
         extra_fields.setdefault("is_superuser", True)
-        extra_fields.setdefault("is_staff", True)  # Add this
+        extra_fields.setdefault("is_staff", True)
         return self.create_user(email, name, password, **extra_fields)
 
 
@@ -31,7 +30,7 @@ class User(AbstractBaseUser, PermissionsMixin):
     is_active = models.BooleanField(default=True)
     is_admin = models.BooleanField(default=False)
     is_staff = models.BooleanField(default=False)
-    is_superuser = models.BooleanField(default=False)  # Add this field
+    is_superuser = models.BooleanField(default=False)
     points_balance = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -46,8 +45,6 @@ class User(AbstractBaseUser, PermissionsMixin):
         return self.email
 
 
-# Item Model for Swapping
-# models.py
 class Item(models.Model):
     STATUS_CHOICES = (
         ("available", "Available"),
@@ -82,12 +79,18 @@ class Item(models.Model):
         ("xl", "XL"),
         ("other", "Other"),
     )
+    APPROVAL_CHOICES = (
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    )
 
     title = models.CharField(max_length=255)
     description = models.TextField()
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="items")
-    status = models.CharField(
-        max_length=20, choices=STATUS_CHOICES, default="available"
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    approval_status = models.CharField(
+        max_length=20, choices=APPROVAL_CHOICES, default="pending"
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -101,15 +104,12 @@ class Item(models.Model):
     condition = models.CharField(
         max_length=50, choices=CONDITION_CHOICES, default="good"
     )
-    tags = models.CharField(
-        max_length=255, blank=True, null=True
-    )  # Comma-separated tags
+    tags = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return self.title
 
 
-# models.py
 class ItemImage(models.Model):
     item = models.ForeignKey(Item, on_delete=models.CASCADE, related_name="images")
     image = models.URLField()
@@ -119,7 +119,6 @@ class ItemImage(models.Model):
         return f"Image for {self.item.title}"
 
 
-# Swap Model for Tracking Swap Transactions
 class Swap(models.Model):
     STATUS_CHOICES = (
         ("pending", "Pending"),

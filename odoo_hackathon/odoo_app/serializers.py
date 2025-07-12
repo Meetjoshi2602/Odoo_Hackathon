@@ -1,14 +1,11 @@
 from rest_framework import serializers
-from .models import User
-from .logs import log_info, log_error, log_warning
-from .models import Item, Swap, ItemImage
+from .models import User, Item, Swap, ItemImage
+from .logs import log_error
 
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     password2 = serializers.CharField(style={"input_type": "password"}, write_only=True)
-    terms_and_condition = serializers.BooleanField(
-        write_only=True
-    )  # Add as serializer field
+    terms_and_condition = serializers.BooleanField(write_only=True)
 
     class Meta:
         model = User
@@ -16,7 +13,6 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
         extra_kwargs = {"password": {"write_only": True}}
 
     def validate(self, data):
-        # Validate terms_and_condition
         if not data.get("terms_and_condition"):
             raise serializers.ValidationError(
                 {"terms_and_condition": "You must agree to the terms and conditions."}
@@ -52,34 +48,16 @@ class UserLoginSerializer(serializers.ModelSerializer):
         fields = ["email", "password"]
 
 
-# User Profile Serializer
 class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ["id", "email", "name", "points_balance", "created_at"]
 
 
-# serializers.py
 class ItemImageSerializer(serializers.ModelSerializer):
     class Meta:
         model = ItemImage
         fields = ["id", "image", "uploaded_at"]
-
-
-from rest_framework import serializers
-from .models import Item, ItemImage
-from .serializers import (
-    UserProfileSerializer,
-    ItemImageSerializer,
-)  # Adjust imports as needed
-
-
-from rest_framework import serializers
-from .models import Item, ItemImage
-from .serializers import (
-    UserProfileSerializer,
-    ItemImageSerializer,
-)  # Adjust imports as needed
 
 
 class ItemSerializer(serializers.ModelSerializer):
@@ -95,6 +73,7 @@ class ItemSerializer(serializers.ModelSerializer):
             "description",
             "owner",
             "status",
+            "approval_status",
             "image",
             "images",
             "points_value",
@@ -116,22 +95,25 @@ class ItemSerializer(serializers.ModelSerializer):
         return value
 
     def create(self, validated_data):
-        # Extract image_urls from validated_data if provided
         image_urls = validated_data.pop("image_urls", [])
-        # Set the owner from the request context
         validated_data["owner"] = self.context["request"].user
-        # Create the item
         item = super().create(validated_data)
-        # Handle multiple image URLs if provided
         for url in image_urls:
             ItemImage.objects.create(item=item, image=url)
         return item
 
     def validate(self, data):
-        # Ensure choices are valid (optional, for extra validation)
-        for field in ["category", "type", "size", "condition"]:
+        field_choices_map = {
+            "category": "CATEGORY_CHOICES",
+            "type": "TYPE_CHOICES",
+            "size": "SIZE_CHOICES",
+            "condition": "CONDITION_CHOICES",
+            "approval_status": "APPROVAL_CHOICES",
+        }
+        for field in ["category", "type", "size", "condition", "approval_status"]:
             if field in data:
-                choices = dict(getattr(Item, f"{field.upper()}_CHOICES", []))
+                choices_attr = field_choices_map[field]
+                choices = dict(getattr(Item, choices_attr, []))
                 if data[field] not in choices:
                     raise serializers.ValidationError(
                         {
@@ -181,22 +163,18 @@ class SwapSerializer(serializers.ModelSerializer):
         )
         request = self.context.get("request")
 
-        # Only validate item fields if they are provided (for updates)
         if item_offered and item_requested:
-            # Ensure items are available
             if (
                 item_offered.status != "available"
                 or item_requested.status != "available"
             ):
                 raise serializers.ValidationError(
-                    "One or both items are not available for swapping."
+                    "One or both items are not available or not approved for swapping."
                 )
 
-            # Ensure user doesn't request their own item
             if item_offered.owner == item_requested.owner:
                 raise serializers.ValidationError("You cannot swap your own items.")
 
-            # Ensure the requester is the owner of the offered item
             if item_offered.owner != request.user:
                 raise serializers.ValidationError("You can only offer items you own.")
 
@@ -207,7 +185,6 @@ class SwapSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        # Update only the fields provided
         if "item_offered" in validated_data:
             instance.item_offered = validated_data["item_offered"]
         if "item_requested" in validated_data:

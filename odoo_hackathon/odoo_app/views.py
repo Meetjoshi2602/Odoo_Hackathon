@@ -1,11 +1,11 @@
 from rest_framework import generics, status
 from rest_framework.views import APIView
-from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
 from rest_framework.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from django.db.models import Q
+from django.db import transaction
 from .models import User, Item, Swap
 from .serializers import (
     UserRegistrationSerializer,
@@ -17,9 +17,9 @@ from .serializers import (
 from .renderers import UserRenderer
 from .logs import log_info, log_error, log_warning
 from .responses import success_response, error_response
+from .logs import log_info, log_error, log_warning
 
 
-# Helper function for generating tokens
 def get_tokens_for_user(user):
     try:
         refresh = RefreshToken.for_user(user)
@@ -32,7 +32,6 @@ def get_tokens_for_user(user):
         raise Exception("Error generating tokens for user") from e
 
 
-# --------- Registration API ------------
 class UserRegistrationView(generics.GenericAPIView):
     renderer_classes = [UserRenderer]
     permission_classes = [AllowAny]
@@ -61,7 +60,6 @@ class UserRegistrationView(generics.GenericAPIView):
             )
 
 
-# --------- Login API ------------
 class UserLoginView(generics.GenericAPIView):
     renderer_classes = [UserRenderer]
     permission_classes = [AllowAny]
@@ -116,7 +114,6 @@ class UserLoginView(generics.GenericAPIView):
             )
 
 
-# --------- Logout API ------------
 class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -141,9 +138,10 @@ class LogoutView(APIView):
             )
 
 
-# --------- Featured Items for Landing Page ------------
 class FeaturedItemsView(generics.ListAPIView):
-    queryset = Item.objects.filter(status="available").order_by("-created_at")[:5]
+    queryset = Item.objects.filter(
+        status="available", approval_status="approved"
+    ).order_by("-created_at")[:5]
     serializer_class = ItemSerializer
     permission_classes = [AllowAny]
 
@@ -159,7 +157,6 @@ class FeaturedItemsView(generics.ListAPIView):
             return error_response("Failed to fetch featured items", str(e))
 
 
-# --------- User Dashboard View ------------
 class UserDashboardView(generics.GenericAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = UserProfileSerializer
@@ -202,25 +199,6 @@ class UserDashboardView(generics.GenericAPIView):
             return error_response("Failed to fetch dashboard data", str(e))
 
 
-import logging
-
-
-logger = logging.getLogger(__name__)
-
-
-# Utility functions for logging
-def log_info(message):
-    logger.info(message)
-
-
-def log_warning(message):
-    logger.warning(message)
-
-
-def log_error(message, exc_info=False):
-    logger.error(message, exc_info=exc_info)
-
-
 class ItemCreateView(generics.CreateAPIView):
     queryset = Item.objects.all()
     serializer_class = ItemSerializer
@@ -233,7 +211,6 @@ class ItemCreateView(generics.CreateAPIView):
             created_items = []
 
             if isinstance(data, list):
-                # Validate that each item in the list is a dictionary
                 for item_data in data:
                     if not isinstance(item_data, dict):
                         log_warning(f"Invalid item data format: {item_data}")
@@ -263,7 +240,6 @@ class ItemCreateView(generics.CreateAPIView):
                     status_code=status.HTTP_201_CREATED,
                 )
             else:
-                # Handle single item creation
                 if not isinstance(data, dict):
                     log_warning(f"Invalid data format: {data}")
                     return error_response(
@@ -299,28 +275,15 @@ class ItemCreateView(generics.CreateAPIView):
             )
 
 
-# Utility functions for logging
-def log_info(message):
-    logger.info(message)
-
-
-def log_warning(message):
-    logger.warning(message)
-
-
-def log_error(message, exc_info=False):
-    logger.error(message, exc_info=exc_info)
-
-
 class ItemDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Item.objects.all()
     serializer_class = ItemSerializer
-    permission_classes = [AllowAny]  # We'll override permissions for PUT and DELETE
+    permission_classes = [AllowAny]
 
     def get_permissions(self):
         if self.request.method in ["PUT", "DELETE"]:
-            return [IsAuthenticated()]  # Only authenticated users can update or delete
-        return [AllowAny()]  # Allow anyone to retrieve
+            return [IsAuthenticated()]
+        return [AllowAny()]
 
     def get(self, request, *args, **kwargs):
         try:
@@ -349,7 +312,6 @@ class ItemDetailView(generics.RetrieveUpdateDestroyAPIView):
                 f"Item update attempt for item ID {self.kwargs['pk']} by user {request.user.id}"
             )
             item = self.get_object()
-            # Check if the user is the owner
             if item.owner != request.user:
                 log_warning(
                     f"User {request.user.id} attempted to update item {self.kwargs['pk']} they do not own"
@@ -396,13 +358,12 @@ class ItemDetailView(generics.RetrieveUpdateDestroyAPIView):
                 f"Item deletion attempt for item ID {self.kwargs['pk']} by user {request.user.id}"
             )
             item = self.get_object()
-            # Check if the user is the owner
-            if item.owner != request.user:
+            if item.owner != request.user and not request.user.is_admin:
                 log_warning(
                     f"User {request.user.id} attempted to delete item {self.kwargs['pk']} they do not own"
                 )
                 return error_response(
-                    "You can only delete your own items",
+                    "You can only delete your own items or must be an admin",
                     status_code=status.HTTP_403_FORBIDDEN,
                 )
             item_title = item.title
@@ -430,19 +391,25 @@ class ItemDetailView(generics.RetrieveUpdateDestroyAPIView):
 
 
 class ItemListView(generics.ListAPIView):
-    queryset = Item.objects.filter(status="available")
     serializer_class = ItemSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        # Filter items by the authenticated user only
+        return Item.objects.filter(owner=self.request.user)
 
     def get(self, request, *args, **kwargs):
         try:
-            log_info("Fetching available items")
+            log_info(f"Fetching all items for user {request.user.id}")
             serializer = self.get_serializer(self.get_queryset(), many=True)
             return success_response(
                 data=serializer.data, msg="Items retrieved successfully"
             )
         except Exception as e:
-            log_error(f"Error fetching items: {str(e)}", exc_info=True)
+            log_error(
+                f"Error fetching items for user {request.user.id}: {str(e)}",
+                exc_info=True,
+            )
             return error_response(
                 "Failed to fetch items",
                 str(e),
@@ -466,12 +433,13 @@ class RedeemItemView(generics.GenericAPIView):
                 )
 
             item = Item.objects.get(id=item_id)
-            if item.status != "available":
+            if item.status != "available" or item.approval_status != "approved":
                 log_warning(
-                    f"User {request.user.id} attempted to redeem unavailable item {item_id}"
+                    f"User {request.user.id} attempted to redeem unavailable or unapproved item {item_id}"
                 )
                 return error_response(
-                    "Item is not available", status_code=status.HTTP_400_BAD_REQUEST
+                    "Item is not available or not approved",
+                    status_code=status.HTTP_400_BAD_REQUEST,
                 )
 
             if item.owner == request.user:
@@ -491,13 +459,14 @@ class RedeemItemView(generics.GenericAPIView):
                     "Insufficient points", status_code=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Deduct points and update item status
-            request.user.points_balance -= item.points_value
-            item.owner.points_balance += item.points_value
-            item.status = "swapped"
-            request.user.save()
-            item.owner.save()
-            item.save()
+            with transaction.atomic():
+                request.user.points_balance -= item.points_value
+                item.owner.points_balance += item.points_value
+                item.status = "swapped"
+                item.owner = request.user
+                request.user.save()
+                item.owner.save()
+                item.save()
 
             log_info(
                 f"User {request.user.id} redeemed item {item.title} for {item.points_value} points"
@@ -524,7 +493,6 @@ class RedeemItemView(generics.GenericAPIView):
             )
 
 
-# --------- Swap Request View ------------
 class SwapRequestView(generics.CreateAPIView):
     queryset = Swap.objects.all()
     serializer_class = SwapSerializer
@@ -553,10 +521,6 @@ class SwapRequestView(generics.CreateAPIView):
             return error_response("An unexpected error occurred", str(e))
 
 
-# --------- Swap Update View ------------
-from django.db import transaction
-
-
 class SwapUpdateView(generics.UpdateAPIView):
     queryset = Swap.objects.all()
     serializer_class = SwapSerializer
@@ -565,7 +529,6 @@ class SwapUpdateView(generics.UpdateAPIView):
     def patch(self, request, *args, **kwargs):
         try:
             swap = self.get_object()
-            # Check if user is requester or owner of requested item
             is_requester = swap.requester == request.user
             is_requested_owner = swap.item_requested.owner == request.user
 
@@ -578,7 +541,6 @@ class SwapUpdateView(generics.UpdateAPIView):
                     status_code=status.HTTP_403_FORBIDDEN,
                 )
 
-            # Restrict fields based on user role
             if is_requester:
                 allowed_fields = {"item_offered_id", "item_requested_id"}
                 if any(key not in allowed_fields for key in request.data.keys()):
@@ -609,7 +571,6 @@ class SwapUpdateView(generics.UpdateAPIView):
                     f"Swap {swap.id} updated to status {serializer.validated_data.get('status', swap.status)} by user {request.user.email}"
                 )
 
-                # Update item statuses, ownership, and points if swap is completed
                 if serializer.validated_data.get("status") == "completed":
                     if not is_requested_owner:
                         log_warning(
@@ -619,7 +580,6 @@ class SwapUpdateView(generics.UpdateAPIView):
                             "Only the requested item owner can complete the swap",
                             status_code=status.HTTP_403_FORBIDDEN,
                         )
-                    # Validate points_value
                     if (
                         swap.item_requested.points_value is None
                         or swap.item_requested.points_value <= 0
@@ -632,35 +592,24 @@ class SwapUpdateView(generics.UpdateAPIView):
                             status_code=status.HTTP_400_BAD_REQUEST,
                         )
 
-                    # Use transaction to ensure atomicity
                     with transaction.atomic():
-                        # Store original owners for logging
                         original_offered_owner = swap.item_offered.owner
                         original_requested_owner = swap.item_requested.owner
 
-                        # Swap item ownership
-                        swap.item_offered.owner = (
-                            swap.item_requested.owner
-                        )  # Requested item's owner gets offered item
-                        swap.item_requested.owner = (
-                            swap.requester
-                        )  # Requester gets requested item
+                        swap.item_offered.owner = original_requested_owner
+                        swap.item_requested.owner = swap.requester
 
-                        # Update item statuses
                         swap.item_offered.status = "swapped"
                         swap.item_requested.status = "swapped"
 
-                        # Save item changes
                         swap.item_offered.save()
                         swap.item_requested.save()
 
-                        # Award points to the requested item owner
-                        swap.item_requested.owner.points_balance += (
+                        original_requested_owner.points_balance += (
                             swap.item_requested.points_value
                         )
-                        swap.item_requested.owner.save()
+                        original_requested_owner.save()
 
-                        # Log the ownership change and points update
                         log_info(
                             f"Swap {swap.id} completed: "
                             f"Item {swap.item_offered.title} ownership transferred from {original_offered_owner.email} to {swap.item_offered.owner.email}; "
@@ -680,6 +629,87 @@ class SwapUpdateView(generics.UpdateAPIView):
             )
             return error_response(
                 "An unexpected error occurred",
+                str(e),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AdminItemModerationView(generics.UpdateAPIView):
+    queryset = Item.objects.all()
+    serializer_class = ItemSerializer
+    permission_classes = [IsAdminUser]
+
+    def patch(self, request, *args, **kwargs):
+        try:
+            item = self.get_object()
+            serializer = self.get_serializer(
+                item, data=request.data, partial=True, context={"request": request}
+            )
+            if serializer.is_valid():
+                approval_status = serializer.validated_data.get("approval_status")
+                if approval_status not in ["approved", "rejected"]:
+                    log_warning(
+                        f"Invalid approval status {approval_status} for item {item.id} by admin {request.user.email}"
+                    )
+                    return error_response(
+                        "Approval status must be 'approved' or 'rejected'",
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                    )
+                if approval_status == "approved" and item.status == "pending":
+                    item.status = "available"
+                elif approval_status == "rejected":
+                    item.status = "pending"  # Keep status as pending for rejected items
+                serializer.save()
+                log_info(
+                    f"Item {item.id} {approval_status} by admin {request.user.email}"
+                )
+                return success_response(
+                    data=serializer.data,
+                    msg=f"Item {approval_status} successfully",
+                    status_code=status.HTTP_200_OK,
+                )
+            log_warning(f"Item moderation failed: {serializer.errors}")
+            return error_response(
+                "Failed to moderate item",
+                serializer.errors,
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+        except Item.DoesNotExist:
+            log_warning(f"Item ID {self.kwargs['pk']} not found for moderation")
+            return error_response(
+                "Item not found", status_code=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            log_error(
+                f"Error moderating item {self.kwargs['pk']} by admin {request.user.id}: {str(e)}",
+                exc_info=True,
+            )
+            return error_response(
+                "Failed to moderate item",
+                str(e),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class AdminItemListView(generics.ListAPIView):
+    queryset = Item.objects.all()
+    serializer_class = ItemSerializer
+    permission_classes = [IsAdminUser]
+
+    def get(self, request, *args, **kwargs):
+        try:
+            log_info(f"Admin {request.user.id} fetching all items for moderation")
+            serializer = self.get_serializer(self.get_queryset(), many=True)
+            return success_response(
+                data=serializer.data, msg="Items retrieved successfully for admin"
+            )
+        except Exception as e:
+            log_error(
+                f"Error fetching items for admin {request.user.id}: {str(e)}",
+                exc_info=True,
+            )
+            return error_response(
+                "Failed to fetch items",
                 str(e),
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
